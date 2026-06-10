@@ -16,7 +16,6 @@ jobs:
           Write-Host "=== Disk before cleanup ===" -ForegroundColor Cyan
           Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free | Format-Table
 
-          # Eliminar herramientas de CI que no necesitas (~6-8GB libres extra)
           $toRemove = @(
             "$env:SystemDrive\hostedtoolcache\windows\Ruby",
             "$env:SystemDrive\hostedtoolcache\windows\go",
@@ -34,11 +33,9 @@ jobs:
             }
           }
 
-          # Usar el disco D: que ya existe en runners (~70GB disponibles)
           Write-Host "=== Disk D: info ===" -ForegroundColor Cyan
           Get-PSDrive D -ErrorAction SilentlyContinue
 
-          # Crear un VHD de 100GB adicional montado como E:
           $vhdPath = "D:\extra_disk.vhdx"
           New-VHD -Path $vhdPath -SizeBytes 100GB -Dynamic -ErrorAction SilentlyContinue
           Mount-VHD -Path $vhdPath
@@ -52,7 +49,6 @@ jobs:
           Write-Host "=== Disk after setup ===" -ForegroundColor Cyan
           Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free | Format-Table
 
-          # Exportar variables de rutas útiles
           "EXTRA_DISK=E:" | Out-File -FilePath $env:GITHUB_ENV -Append
           "STORAGE_ROOT=D:\storage" | Out-File -FilePath $env:GITHUB_ENV -Append
           New-Item -ItemType Directory -Force -Path "D:\storage" | Out-Null
@@ -105,11 +101,9 @@ jobs:
           $installer = "$env:TEMP\nodejs_installer.msi"
           
           Invoke-WebRequest -Uri $nodeUrl -OutFile $installer -UseBasicParsing
-          
-          # Instalación silenciosa para todos los usuarios, añadir al PATH
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart", "ALLUSERS=1" -Wait
           
-          # Actualizar PATH en la sesión actual
+          # Refrescar PATH completo desde el registro
           $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
           
           node --version
@@ -117,7 +111,7 @@ jobs:
           Write-Host "Node.js + npm installed successfully" -ForegroundColor Green
 
       # ─────────────────────────────────────────────
-      # 4. INSTALAR PYTHON
+      # 4. INSTALAR PYTHON + PIP
       # ─────────────────────────────────────────────
       - name: Install Python
         run: |
@@ -127,12 +121,37 @@ jobs:
           
           Invoke-WebRequest -Uri $pythonUrl -OutFile $installer -UseBasicParsing
           
-          Start-Process $installer -ArgumentList "/quiet", "InstallAllUsers=1", "PrependPath=1", "Include_pip=1", "Include_test=0" -Wait
+          # Instalar Python: TODOS los usuarios, añadir al PATH, incluir pip, SIN alias de Windows Store
+          Start-Process $installer -ArgumentList "/quiet", "InstallAllUsers=1", "PrependPath=1", "Include_pip=1", "Include_test=0", "Include_launcher=0" -Wait
           
+          # Refrescar PATH desde el registro
           $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
           
-          python --version
-          pip --version
+          # Desactivar alias de Microsoft Store para python/pip (Windows 10/11)
+          Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps\python*.exe" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps\pip*.exe" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          
+          # Usar ruta absoluta para verificar
+          $pythonPath = "C:\Program Files\Python312\python.exe"
+          $pipPath = "C:\Program Files\Python312\Scripts\pip.exe"
+          
+          if (Test-Path $pythonPath) {
+            & $pythonPath --version
+          } else {
+            # Buscar python en PATH
+            $py = Get-Command python -ErrorAction SilentlyContinue
+            if ($py) { & $py.Source --version } else { Write-Warning "Python not found in PATH" }
+          }
+          
+          if (Test-Path $pipPath) {
+            & $pipPath --version
+          } else {
+            # Intentar con python -m pip
+            if (Test-Path $pythonPath) {
+              & $pythonPath -m pip --version
+            }
+          }
+          
           Write-Host "Python installed successfully" -ForegroundColor Green
 
       # ─────────────────────────────────────────────
@@ -179,20 +198,18 @@ jobs:
         run: |
           Write-Host "=== Installing OpenCode AI ===" -ForegroundColor Cyan
           
-          # Verificar que npm está disponible
           npm --version
           
-          # Instalar opencode-ai globalmente
           npm install -g opencode-ai@latest
           
-          # Actualizar PATH por si npm global bin no está incluido
+          # Refrescar PATH y añadir npm global bin
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
           $npmPrefix = & npm config get prefix
           $npmBin = "$npmPrefix"
           if (Test-Path "$npmPrefix\bin") { $npmBin = "$npmPrefix\bin" }
           [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$npmBin", "Machine")
           $env:Path += ";$npmBin"
           
-          # Verificar instalación
           opencode --version
           Write-Host "OpenCode AI installed successfully" -ForegroundColor Green
 
@@ -330,7 +347,22 @@ jobs:
           try { opencode --version 2>$null; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
           
           Write-Host "║  PYTHON:" -NoNewline
-          try { python --version 2>$null; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
+          try { 
+            $py = Get-Command python -ErrorAction SilentlyContinue
+            if ($py) { & $py.Source --version 2>$null; Write-Host " ✓" -ForegroundColor Green }
+            else { Write-Host " ✗" -ForegroundColor Red }
+          } catch { Write-Host " ✗" -ForegroundColor Red }
+          
+          Write-Host "║  PIP:    " -NoNewline
+          try { 
+            $pip = Get-Command pip -ErrorAction SilentlyContinue
+            if ($pip) { & $pip.Source --version 2>$null; Write-Host " ✓" -ForegroundColor Green }
+            else { 
+              $py = Get-Command python -ErrorAction SilentlyContinue
+              if ($py) { & $py.Source -m pip --version 2>$null; Write-Host " ✓ (via python -m pip)" -ForegroundColor Green }
+              else { Write-Host " ✗" -ForegroundColor Red }
+            }
+          } catch { Write-Host " ✗" -ForegroundColor Red }
           
           Write-Host "║  GIT:   " -NoNewline
           try { git --version 2>$null; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
@@ -369,7 +401,7 @@ jobs:
           Write-Host "║  INSTALLED APPS                                  ║" -ForegroundColor Cyan
           Write-Host "║  • Node.js 22 LTS + npm                          ║"
           Write-Host "║  • OpenCode AI (npm global)                      ║"
-          Write-Host "║  • Python 3.12 (con pip)                         ║"
+          Write-Host "║  • Python 3.12 + pip                             ║"
           Write-Host "║  • Git for Windows 2.54                          ║"
           Write-Host "║  • Flutter SDK (stable) + Dart                   ║"
           Write-Host "║  • Opera GX (navegador gamer)                    ║"
