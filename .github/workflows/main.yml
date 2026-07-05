@@ -54,18 +54,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path "D:\storage" | Out-Null
 
       # ─────────────────────────────────────────────
-      # 2. INSTALAR MESA3D CON SCRIPT OFICIAL (per-machine)
+      # 2. INSTALAR MESA3D (OpenGL SOFTWARE RENDERER)
       # ─────────────────────────────────────────────
-      - name: Install Mesa3D Full Stack (Software GPU)
+      - name: Install Mesa3D OpenGL (Software GPU)
         run: |
-          Write-Host "=== Installing Mesa3D Full Stack ===" -ForegroundColor Cyan
-          
-          # Descargar 7-Zip portable
+          $mesaUrl = "https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-mingw.7z"
           $sevenZipUrl = "https://www.7-zip.org/a/7zr.exe"
+          
           Invoke-WebRequest -Uri $sevenZipUrl -OutFile "$env:TEMP\7zr.exe" -UseBasicParsing
           
-          # Mesa3D MSVC release (incluye script de deploy)
-          $mesaUrl = "https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z"
           Write-Host "Downloading Mesa3D..." -ForegroundColor Cyan
           Invoke-WebRequest -Uri $mesaUrl -OutFile "$env:TEMP\mesa3d.7z" -UseBasicParsing
           
@@ -73,112 +70,32 @@ jobs:
           New-Item -ItemType Directory -Force -Path $mesaDir | Out-Null
           & "$env:TEMP\7zr.exe" x "$env:TEMP\mesa3d.7z" -o"$mesaDir" -y | Out-Null
           
-          # Buscar el script de deploy oficial
-          $deployScript = Get-ChildItem -Path $mesaDir -Filter "systemwidedeploy.cmd" -Recurse | Select-Object -First 1
-          
-          if ($deployScript) {
-            Write-Host "Found deploy script at: $($deployScript.FullName)" -ForegroundColor Green
-            $scriptDir = Split-Path -Parent $deployScript.FullName
-            
-            # Ejecutar el script con modo per-machine (1) y x64 (1)
-            # El script hace: copia a SysWOW64/System32 con permisos elevados
-            # Usamos cmd /c para ejecutar el batch correctamente
-            Push-Location $scriptDir
-            & cmd /c "systemwidedeploy.cmd 1 1"
-            $deployExit = $LASTEXITCODE
-            Pop-Location
-            
-            Write-Host "Deploy script exited with code: $deployExit" -ForegroundColor $(if($deployExit -eq 0){"Green"}else{"Yellow"})
+          $installScript = Get-ChildItem -Path $mesaDir -Filter "systemwidedeploy.cmd" -Recurse | Select-Object -First 1
+          if ($installScript) {
+            Write-Host "Installing Mesa3D system-wide..." -ForegroundColor Cyan
+            & cmd /c "`"$($installScript.FullName)`" x64"
           } else {
-            Write-Warning "Deploy script not found, falling back to per-app deployment"
+            Write-Warning "systemwidedeploy.cmd not found, using per-app deployment"
+            $x64dir = Get-ChildItem -Path $mesaDir -Filter "x64" -Recurse -Directory | Select-Object -First 1
+            if ($x64dir) {
+              $mesaBin = "C:\mesa3d\bin"
+              New-Item -ItemType Directory -Force -Path $mesaBin | Out-Null
+              Copy-Item "$($x64dir.FullName)\*" "$mesaBin\" -Recurse -Force
+              Write-Host "Mesa3D saved to $mesaBin" -ForegroundColor Yellow
+            }
           }
           
-          # También copiar a un directorio local para apps que no lean System32
-          $mesaBinDir = "$mesaDir\x64"
-          $localMesa = "C:\mesa3d\bin"
-          New-Item -ItemType Directory -Force -Path $localMesa | Out-Null
+          $openglDll = Test-Path "C:\Windows\System32\opengl32.dll"
+          Write-Host "OpenGL DLL present: $openglDll" -ForegroundColor Green
           
-          # Si encontramos el directorio x64 dentro de la extracción
-          $x64Found = Get-ChildItem -Path $mesaDir -Filter "x64" -Recurse -Directory | Select-Object -First 1
-          if ($x64Found) {
-            Copy-Item "$($x64Found.FullName)\*" "$localMesa\" -Recurse -Force
-            Write-Host "Mesa binaries copied to $localMesa" -ForegroundColor Green
-          }
-          
-          # Instalar VC++ Redistributables (necesarios para Mesa)
           $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
           Invoke-WebRequest -Uri $vcUrl -OutFile "$env:TEMP\vc_redist.x64.exe" -UseBasicParsing
           Start-Process "$env:TEMP\vc_redist.x64.exe" -ArgumentList "/quiet", "/norestart" -Wait
           
-          # Variables de entorno para forzar software rendering
-          [Environment]::SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe", "Machine")
-          [Environment]::SetEnvironmentVariable("MESA_GL_VERSION_OVERRIDE", "4.6", "Machine")
-          [Environment]::SetEnvironmentVariable("MESA_GLSL_VERSION_OVERRIDE", "460", "Machine")
-          [Environment]::SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1", "Machine")
-          
-          # Refrescar env para esta sesión
-          $env:GALLIUM_DRIVER = "llvmpipe"
-          $env:MESA_GL_VERSION_OVERRIDE = "4.6"
-          $env:MESA_GLSL_VERSION_OVERRIDE = "460"
-          $env:LIBGL_ALWAYS_SOFTWARE = "1"
-          
-          # Verificar que OpenGL está disponible
-          $sys32 = "C:\Windows\System32"
-          $openglOk = Test-Path "$sys32\opengl32.dll"
-          Write-Host "System32 opengl32.dll present: $openglOk" -ForegroundColor $(if($openglOk){"Green"}else{"Yellow"})
-          
-          # Guardar info
-          "MESA_DIR=$mesaDir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "MESA_BIN=$localMesa" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "GALLIUM_DRIVER=llvmpipe" | Out-File -FilePath $env:GITHUB_ENV -Append
-          
-          Write-Host "Mesa3D installation completed" -ForegroundColor Green
+          Write-Host "Mesa3D (software OpenGL) installed successfully" -ForegroundColor Green
 
       # ─────────────────────────────────────────────
-      # 3. INSTALAR NODE.JS + NPM
-      # ─────────────────────────────────────────────
-      - name: Install Node.js LTS (with npm)
-        run: |
-          Write-Host "=== Installing Node.js LTS ===" -ForegroundColor Cyan
-          $nodeUrl = "https://nodejs.org/dist/v22.15.0/node-v22.15.0-x64.msi"
-          $installer = "$env:TEMP\nodejs_installer.msi"
-          
-          Invoke-WebRequest -Uri $nodeUrl -OutFile $installer -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart", "ALLUSERS=1" -Wait
-          
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-          
-          node --version
-          npm --version
-          Write-Host "Node.js + npm installed successfully" -ForegroundColor Green
-
-      # ─────────────────────────────────────────────
-      # 4. INSTALAR PYTHON + PIP
-      # ─────────────────────────────────────────────
-      - name: Install Python
-        run: |
-          Write-Host "=== Installing Python ===" -ForegroundColor Cyan
-          $pythonUrl = "https://www.python.org/ftp/python/3.12.4/python-3.12.4-amd64.exe"
-          $installer = "$env:TEMP\python_installer.exe"
-          
-          Invoke-WebRequest -Uri $pythonUrl -OutFile $installer -UseBasicParsing
-          Start-Process $installer -ArgumentList "/quiet", "InstallAllUsers=1", "PrependPath=1", "Include_pip=1", "Include_test=0", "Include_launcher=0" -Wait
-          
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-          
-          Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps\python*.exe" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-          Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps\pip*.exe" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-          
-          $pythonPath = "C:\Program Files\Python312\python.exe"
-          $pipPath = "C:\Program Files\Python312\Scripts\pip.exe"
-          
-          if (Test-Path $pythonPath) { & $pythonPath --version } else { python --version }
-          if (Test-Path $pipPath) { & $pipPath --version } else { python -m pip --version }
-          
-          Write-Host "Python installed successfully" -ForegroundColor Green
-
-      # ─────────────────────────────────────────────
-      # 5. INSTALAR GIT
+      # 3. INSTALAR GIT
       # ─────────────────────────────────────────────
       - name: Install Git for Windows
         run: |
@@ -195,27 +112,7 @@ jobs:
           Write-Host "Git installed successfully" -ForegroundColor Green
 
       # ─────────────────────────────────────────────
-      # 6. INSTALAR JAVA (REQUERIDO POR MINECRAFT)
-      # ─────────────────────────────────────────────
-      - name: Install Java 21 (Minecraft compatible)
-        run: |
-          Write-Host "=== Installing Java 21 LTS ===" -ForegroundColor Cyan
-          $javaUrl = "https://download.oracle.com/java/21/latest/jdk-21_windows-x64_bin.exe"
-          $installer = "$env:TEMP\jdk21_installer.exe"
-          
-          Invoke-WebRequest -Uri $javaUrl -OutFile $installer -UseBasicParsing
-          Start-Process $installer -ArgumentList "/s", "INSTALLDIR=C:\Java21" -Wait
-          
-          [Environment]::SetEnvironmentVariable("JAVA_HOME", "C:\Java21", "Machine")
-          [Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Java21\bin", "Machine")
-          $env:Path += ";C:\Java21\bin"
-          $env:JAVA_HOME = "C:\Java21"
-          
-          java -version
-          Write-Host "Java 21 installed successfully" -ForegroundColor Green
-
-      # ─────────────────────────────────────────────
-      # 7. INSTALAR STEAM
+      # 4. INSTALAR STEAM
       # ─────────────────────────────────────────────
       - name: Install Steam
         run: |
@@ -250,13 +147,10 @@ jobs:
             Get-ChildItem -Path "C:\" -Filter "Steam.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 3 FullName
           }
           
-          [Environment]::SetEnvironmentVariable("STEAM_DIR", "C:\Steam", "Machine")
-          $env:STEAM_DIR = "C:\Steam"
-          
           Write-Host "Steam installed successfully" -ForegroundColor Green
 
       # ─────────────────────────────────────────────
-      # 8. CONFIGURAR RDP
+      # 5. CONFIGURAR RDP
       # ─────────────────────────────────────────────
       - name: Configure RDP Settings
         run: |
@@ -275,7 +169,7 @@ jobs:
           Write-Host "RDP configured." -ForegroundColor Green
 
       # ─────────────────────────────────────────────
-      # 9. CREAR USUARIO RDP
+      # 6. CREAR USUARIO RDP
       # ─────────────────────────────────────────────
       - name: Create RDP User
         run: |
@@ -305,7 +199,7 @@ jobs:
           Write-Host "RDP user created." -ForegroundColor Green
 
       # ─────────────────────────────────────────────
-      # 10. INSTALAR TAILSCALE
+      # 7. INSTALAR TAILSCALE
       # ─────────────────────────────────────────────
       - name: Install Tailscale
         run: |
@@ -316,7 +210,7 @@ jobs:
           Remove-Item $installer -Force
 
       # ─────────────────────────────────────────────
-      # 11. CONECTAR TAILSCALE
+      # 8. CONECTAR TAILSCALE
       # ─────────────────────────────────────────────
       - name: Connect Tailscale
         run: |
@@ -336,7 +230,7 @@ jobs:
           Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
 
       # ─────────────────────────────────────────────
-      # 12. VERIFICAR RDP
+      # 9. VERIFICAR RDP
       # ─────────────────────────────────────────────
       - name: Verify RDP
         run: |
@@ -347,7 +241,7 @@ jobs:
           Write-Host "RDP reachable on port 3389 ✓" -ForegroundColor Green
 
       # ─────────────────────────────────────────────
-      # 13. VERIFICAR APLICACIONES INSTALADAS
+      # 10. VERIFICAR APLICACIONES INSTALADAS
       # ─────────────────────────────────────────────
       - name: Verify Installed Apps
         run: |
@@ -356,42 +250,45 @@ jobs:
           Write-Host "║         VERIFICATION REPORT                      ║" -ForegroundColor Cyan
           Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
           
-          Write-Host "║  NODE.JS:" -NoNewline
-          try { node --version 2>$null; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
-          
-          Write-Host "║  NPM:    " -NoNewline
-          try { npm --version 2>$null; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
-          
-          Write-Host "║  PYTHON:" -NoNewline
-          try { 
-            $py = Get-Command python -ErrorAction SilentlyContinue
-            if ($py) { & $py.Source --version 2>$null; Write-Host " ✓" -ForegroundColor Green }
-            else { Write-Host " ✗" -ForegroundColor Red }
-          } catch { Write-Host " ✗" -ForegroundColor Red }
-          
-          Write-Host "║  PIP:    " -NoNewline
-          try { 
-            $pip = Get-Command pip -ErrorAction SilentlyContinue
-            if ($pip) { & $pip.Source --version 2>$null; Write-Host " ✓" -ForegroundColor Green }
-            else { 
-              $py = Get-Command python -ErrorAction SilentlyContinue
-              if ($py) { & $py.Source -m pip --version 2>$null; Write-Host " ✓ (via python -m pip)" -ForegroundColor Green }
-              else { Write-Host " ✗" -ForegroundColor Red }
-            }
-          } catch { Write-Host " ✗" -ForegroundColor Red }
-          
           Write-Host "║  GIT:   " -NoNewline
           try { git --version 2>$null; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
-          
-          Write-Host "║  JAVA:  " -NoNewline
-          try { java -version 2>&1 | Select-Object -First 1; Write-Host " ✓" -ForegroundColor Green } catch { Write-Host " ✗" -ForegroundColor Red }
           
           Write-Host "║  STEAM: " -NoNewline
           $steamExe = "C:\Steam\Steam.exe"
           if (Test-Path $steamExe) { Write-Host " ✓" -ForegroundColor Green } else { Write-Host " ✗" -ForegroundColor Red }
           
           Write-Host "║  MESA3D:" -NoNewline
-          $mesaOk = Test-Path "C:\mesa3d\bin\opengl32.dll"
-          if ($mesaOk) { Write-Host " ✓ (OpenGL 4.6)" -ForegroundColor Green } else { Write-Host " ✗" -ForegroundColor Red }
+          $mesaOk = Test-Path "C:\Windows\System32\opengl32.dll"
+          if ($mesaOk) { Write-Host " ✓" -ForegroundColor Green } else { Write-Host " ✗" -ForegroundColor Red }
           
-          Write-Host "╚════════════════
+          Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host ""
+
+      # ─────────────────────────────────────────────
+      # 11. MANTENER SESIÓN ACTIVA
+      # ─────────────────────────────────────────────
+      - name: Keep Alive & Show Credentials
+        run: |
+          Write-Host ""
+          Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
+          Write-Host "║         RDP ACCESS INFO                          ║" -ForegroundColor Cyan
+          Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
+          Write-Host "║  IP:       $env:TAILSCALE_IP"
+          Write-Host "║  User:     RDP"
+          Write-Host "║  Password: $env:RDP_PASSWORD"
+          Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
+          Write-Host "║  STORAGE                                         ║"
+          Write-Host "║  C: ~14GB (sistema)                              ║"
+          Write-Host "║  D: ~70GB (runner disk)                          ║"
+          Write-Host "║  E: ~100GB (VHD extra)                           ║"
+          Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
+          Write-Host "║  GPU: Mesa3D Software OpenGL 3.x                 ║" -ForegroundColor Cyan
+          Write-Host "║  (permite Steam, Minecraft, etc.)                  ║" -ForegroundColor Cyan
+          Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host ""
+          
+          while ($true) {
+            Start-Sleep -Seconds 60
+            Write-Host "[$(Get-Date)] Session alive..." -ForegroundColor DarkGray
+          }
+          
