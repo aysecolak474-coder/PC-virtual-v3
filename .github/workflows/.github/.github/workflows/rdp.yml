@@ -1,115 +1,637 @@
-```yaml
-name: RDP
+name: Browser Windows Desktop
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  browser-desktop:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+
+      # =========================================================
+      # 1. DISK HAZIRLA
+      # =========================================================
+      - name: Prepare Storage
+        shell: powershell
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          Write-Host "=== Disk information ===" -ForegroundColor Cyan
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, Used, Free |
+            Format-Table
 
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          $vhdPath = "D:\extra_disk.vhdx"
 
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Secure Password
-        run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126))
+          if (-not (Test-Path $vhdPath)) {
+            New-VHD `
+              -Path $vhdPath `
+              -SizeBytes 100GB `
+              -Dynamic `
+              -ErrorAction SilentlyContinue
           }
+
+          try {
+            Mount-VHD -Path $vhdPath -ErrorAction SilentlyContinue
+          } catch {}
+
+          Start-Sleep -Seconds 3
+
+          $disk = Get-Disk |
+            Where-Object {
+              $_.OperationalStatus -eq "Online" -and
+              $_.PartitionStyle -eq "RAW"
+            } |
+            Select-Object -Last 1
+
+          if ($disk) {
+            Initialize-Disk `
+              -Number $disk.Number `
+              -PartitionStyle MBR `
+              -PassThru |
+              New-Partition `
+              -AssignDriveLetter `
+              -UseMaximumSize |
+              Format-Volume `
+              -FileSystem NTFS `
+              -NewFileSystemLabel "ExtraDisk" `
+              -Confirm:$false
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "D:\storage" |
+            Out-Null
+
+          "EXTRA_DISK=E:" |
+            Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+
+          "STORAGE_ROOT=D:\storage" |
+            Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+
+      # =========================================================
+      # 2. RDP'Yİ DE AÇ
+      # =========================================================
+      - name: Configure RDP
+        shell: powershell
+        run: |
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "SecurityLayer" `
+            -Value 0 `
+            -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389
+
+          Restart-Service TermService -Force
+
+          Write-Host "RDP configured." -ForegroundColor Green
+
+      # =========================================================
+      # 3. RDP KULLANICISI
+      # =========================================================
+      - name: Create RDP User
+        shell: powershell
+        run: |
+          $upper = [char[]](65..90)
+          $lower = [char[]](97..122)
+          $numbers = [char[]](48..57)
+          $special = [char[]]@(33,35,36,37,38,42,43,45,61,64)
 
           $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
 
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $rawPassword += $upper |
+            Get-Random -Count 4
 
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          $rawPassword += $lower |
+            Get-Random -Count 4
 
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          $rawPassword += $numbers |
+            Get-Random -Count 4
 
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
+          $rawPassword += $special |
+            Get-Random -Count 4
+
+          $password = -join (
+            $rawPassword |
+            Sort-Object { Get-Random }
+          )
+
+          $securePassword =
+            ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
+
+          New-LocalUser `
+            -Name "RDP" `
+            -Password $securePassword `
+            -AccountNeverExpires `
+            -ErrorAction SilentlyContinue
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "RDP" `
+            -ErrorAction SilentlyContinue
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "RDP" `
+            -ErrorAction SilentlyContinue
+
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            throw "RDP user creation failed."
           }
 
+          "RDP_PASSWORD=$password" |
+            Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+
+          Write-Host "RDP user created." -ForegroundColor Green
+
+      # =========================================================
+      # 4. TAILSCALE KUR
+      # =========================================================
       - name: Install Tailscale
+        shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $url =
+            "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
 
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          $installer =
+            "$env:TEMP\tailscale.msi"
 
-      - name: Establish Tailscale Connection
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $installer `
+            -UseBasicParsing
+
+          Start-Process `
+            msiexec.exe `
+            -ArgumentList @(
+              "/i",
+              $installer,
+              "/quiet",
+              "/norestart"
+            ) `
+            -Wait
+
+          Remove-Item `
+            $installer `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Tailscale installed." -ForegroundColor Green
+
+      # =========================================================
+      # 5. TAILSCALE'A BAĞLAN
+      # =========================================================
+      - name: Connect Tailscale
+        shell: powershell
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          $ts =
+            "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          & $ts up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-browser-$env:GITHUB_RUN_ID
 
           $tsIP = $null
-          $retries = 0
 
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+          for ($i = 0; $i -lt 20; $i++) {
+
+            Start-Sleep -Seconds 3
+
+            $tsIP =
+              (& $ts ip -4 2>$null |
+              Select-Object -First 1)
+
+            if ($tsIP) {
+              break
+            }
           }
 
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
+            throw "Tailscale IP could not be obtained."
           }
 
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          "TAILSCALE_IP=$tsIP" |
+            Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
 
-      - name: Verify RDP Accessibility
+          Write-Host ""
+          Write-Host "Tailscale IP: $tsIP" `
+            -ForegroundColor Green
+
+      # =========================================================
+      # 6. RDP TEST
+      # =========================================================
+      - name: Verify RDP
+        shell: powershell
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $result =
+            Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389
 
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
+          if (-not $result.TcpTestSucceeded) {
+            throw "RDP port 3389 is not reachable."
           }
 
-          Write-Host "TCP connectivity successful!"
+          Write-Host `
+            "RDP port 3389 reachable." `
+            -ForegroundColor Green
 
-      - name: Maintain Connection
+      # =========================================================
+      # 7. PYTHON
+      # =========================================================
+      - name: Install Python
+        shell: powershell
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
+          if (-not (Get-Command python.exe -ErrorAction SilentlyContinue)) {
+
+            Write-Host "Python not found. Installing..." `
+              -ForegroundColor Yellow
+
+            choco install python -y --no-progress
+
+            $env:Path =
+              [Environment]::GetEnvironmentVariable(
+                "Path",
+                "Machine"
+              ) + ";" +
+              [Environment]::GetEnvironmentVariable(
+                "Path",
+                "User"
+              )
+          }
+
+          $python =
+            (Get-Command python.exe -ErrorAction Stop).Source
+
+          Write-Host "Python: $python" `
+            -ForegroundColor Green
+
+          & $python --version
+
+      # =========================================================
+      # 8. TIGHTVNC KUR
+      # =========================================================
+      - name: Install TightVNC
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $msi =
+            "$env:TEMP\tightvnc.msi"
+
+          $url =
+            "https://www.tightvnc.com/download/2.8.88/tightvnc-2.8.88-gpl-setup-64bit.msi"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $msi `
+            -UseBasicParsing
+
+          # VNC maksimum 8 karakter kullanır.
+          # RDP şifresinin ilk 8 karakterini kullanıyoruz.
+          $vncPassword =
+            $env:RDP_PASSWORD.Substring(0,8)
+
+          $arguments = @(
+            "/i",
+            $msi,
+            "/quiet",
+            "/norestart",
+
+            "ADDLOCAL=Server",
+
+            "SERVER_REGISTER_AS_SERVICE=1",
+
+            "SERVER_ADD_FIREWALL_EXCEPTION=1",
+
+            "SET_USEVNCAUTHENTICATION=1",
+
+            "VALUE_OF_USEVNCAUTHENTICATION=1",
+
+            "SET_PASSWORD=1",
+
+            "VALUE_OF_PASSWORD=$vncPassword"
+          )
+
+          $process =
+            Start-Process `
+            msiexec.exe `
+            -ArgumentList $arguments `
+            -Wait `
+            -PassThru
+
+          if ($process.ExitCode -ne 0) {
+            throw "TightVNC installation failed: $($process.ExitCode)"
+          }
+
+          Remove-Item `
+            $msi `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          Start-Sleep -Seconds 5
+
+          $service =
+            Get-Service `
+            -Name "tvnserver" `
+            -ErrorAction SilentlyContinue
+
+          if (-not $service) {
+            throw "TightVNC service was not found."
+          }
+
+          if ($service.Status -ne "Running") {
+            Start-Service "tvnserver"
+          }
+
+          Write-Host `
+            "TightVNC is running." `
+            -ForegroundColor Green
+
+      # =========================================================
+      # 9. VNC'Yİ DIŞARIDAN KAPAT
+      # =========================================================
+      - name: Protect VNC Port
+        shell: powershell
+        run: |
+          Get-NetFirewallRule `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.DisplayName -like "*TightVNC*"
+            } |
+            Remove-NetFirewallRule `
+            -ErrorAction SilentlyContinue
+
+          Write-Host `
+            "External VNC firewall rules removed." `
+            -ForegroundColor Green
+
+      # =========================================================
+      # 10. NOVNC İNDİR
+      # =========================================================
+      - name: Install noVNC
+        shell: powershell
+        run: |
+          $novnc =
+            "C:\noVNC"
+
+          if (Test-Path $novnc) {
+            Remove-Item `
+              $novnc `
+              -Recurse `
+              -Force
+          }
+
+          git clone `
+            --depth 1 `
+            https://github.com/novnc/noVNC.git `
+            $novnc
+
+          if (-not (Test-Path "$novnc\utils\novnc_proxy")) {
+            throw "noVNC download failed."
+          }
+
+          Write-Host `
+            "noVNC downloaded." `
+            -ForegroundColor Green
+
+      # =========================================================
+      # 11. NOVNC BAŞLAT
+      # =========================================================
+      - name: Start noVNC
+        shell: powershell
+        run: |
+          $python =
+            (Get-Command python.exe -ErrorAction Stop).Source
+
+          $novnc =
+            "C:\noVNC"
+
+          Write-Host `
+            "Starting noVNC on port 6080..." `
+            -ForegroundColor Cyan
+
+          $args = @(
+            "utils\novnc_proxy",
+            "--vnc",
+            "127.0.0.1:5900",
+            "--listen",
+            "6080"
+          )
+
+          Start-Process `
+            -FilePath $python `
+            -WorkingDirectory $novnc `
+            -ArgumentList $args `
+            -WindowStyle Hidden
+
+          Start-Sleep -Seconds 12
+
+          try {
+
+            Invoke-WebRequest `
+              -Uri "http://127.0.0.1:6080/vnc.html" `
+              -UseBasicParsing `
+              -TimeoutSec 15 |
+              Out-Null
+
+          } catch {
+
+            Write-Host ""
+            Write-Host "=== noVNC TEST FAILED ===" `
+              -ForegroundColor Red
+
+            Get-Process python `
+              -ErrorAction SilentlyContinue |
+              Select-Object Id,ProcessName,Path |
+              Format-Table
+
+            throw "noVNC did not start correctly."
+          }
+
+          Write-Host ""
+          Write-Host `
+            "noVNC is running on port 6080." `
+            -ForegroundColor Green
+
+      # =========================================================
+      # 12. TAILSCALE FUNNEL
+      # =========================================================
+      - name: Create Browser URL
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $ts =
+            "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          Write-Host ""
+          Write-Host `
+            "Starting Tailscale Funnel..." `
+            -ForegroundColor Cyan
+
+          & $ts funnel --bg --yes 6080
+
+          Start-Sleep -Seconds 8
+
+          $status =
+            (& $ts funnel status 2>&1 |
+            Out-String)
+
+          Write-Host ""
+          Write-Host "=== FUNNEL STATUS ===" `
+            -ForegroundColor Cyan
+
+          Write-Host $status
+
+          $match =
+            [regex]::Match(
+              $status,
+              "https://[A-Za-z0-9.-]+\.ts\.net"
+            )
+
+          if (-not $match.Success) {
+
+            Write-Host ""
+            Write-Host `
+              "Funnel URL could not be detected." `
+              -ForegroundColor Red
+
+            Write-Host ""
+            Write-Host $status
+
+            throw `
+              "Tailscale Funnel could not create a public URL."
+          }
+
+          $webUrl =
+            $match.Value + "/vnc.html"
+
+          "NOVNC_URL=$webUrl" |
+            Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+
+          Write-Host ""
+          Write-Host "============================================" `
+            -ForegroundColor Green
+
+          Write-Host `
+            " BROWSER DESKTOP:" `
+            -ForegroundColor Green
+
+          Write-Host `
+            $webUrl `
+            -ForegroundColor Green
+
+          Write-Host "============================================" `
+            -ForegroundColor Green
+
+          Write-Host ""
+          Write-Host `
+            "VNC PASSWORD = RDP PASSWORD'UN ILK 8 KARAKTERI" `
+            -ForegroundColor Yellow
+
+      # =========================================================
+      # 13. BİLGİLER
+      # =========================================================
+      - name: Show Access Information
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "╔══════════════════════════════════════════════╗" `
+            -ForegroundColor Cyan
+
+          Write-Host "║        BROWSER WINDOWS DESKTOP              ║" `
+            -ForegroundColor Cyan
+
+          Write-Host "╠══════════════════════════════════════════════╣" `
+            -ForegroundColor Cyan
+
+          Write-Host "║ Tailscale IP: $env:TAILSCALE_IP"
+
+          Write-Host "║ User:         RDP"
+
+          Write-Host "║ Browser URL:  $env:NOVNC_URL"
+
+          Write-Host "║ VNC Password: RDP şifresinin ilk 8 karakteri"
+
+          Write-Host "╠══════════════════════════════════════════════╣" `
+            -ForegroundColor Cyan
+
+          Write-Host "║ C: Windows system"
+
+          Write-Host "║ D: Runner storage"
+
+          Write-Host "║ E: Extra VHD"
+
+          Write-Host "╚══════════════════════════════════════════════╝" `
+            -ForegroundColor Cyan
+
+      # =========================================================
+      # 14. MAKİNEYİ YAŞAT
+      # =========================================================
+      - name: Keep Alive
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host `
+            "============================================" `
+            -ForegroundColor Green
+
+          Write-Host `
+            " BROWSER DESKTOP ACTIVE" `
+            -ForegroundColor Green
+
+          Write-Host `
+            $env:NOVNC_URL `
+            -ForegroundColor Green
+
+          Write-Host `
+            "============================================" `
+            -ForegroundColor Green
+
+          $i = 0
 
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
-```
 
+            Start-Sleep -Seconds 60
+
+            $i++
+
+            Write-Host `
+              "Keep alive... $i minutes" `
+              -ForegroundColor DarkGray
+          }
